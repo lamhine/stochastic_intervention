@@ -29,32 +29,7 @@ library(tikzDevice)
 set.seed(123)
 ```
 
-# Get model and data.frame for stochastic interventions
-```{r}
-# set model to use
-model <- mi_res.anx
-
-# remove latino and other race participants for the model
-ah_nlo <- ah_cc %>% 
-   filter(latino != 1, 
-          multi_1 != "Other_alone") %>% 
-   dplyr::select(-c("latino", "preg_w4")) %>% 
-  #mutate(multi_1 = fct_relevel(multi_1, "Asian_alone")) %>% 
-  mutate(multi_1 = droplevels(multi_1)) %>% 
-   filter(complete.cases(.)) # drop incomplete cases for now
-
-# additionally remove pregnant participants for the model
-ah_nlop <- ah_cc %>% 
-   filter(latino != 1, 
-          multi_1 != "Other_alone",
-          preg_w4 != 1) %>% 
-   dplyr::select(-c("latino", "preg_w4")) %>% 
-  mutate(multi_1 = fct_relevel(multi_1, "Asian_alone"),
-         multi_1 = droplevels(multi_1)) %>% 
-   filter(complete.cases(.)) # drop incomplete cases for now
-```
-
-## Intervention 1 IF WHITES ARE REFERENCE
+## Intervention code (setting White as reference racial group)
 ```{r}
 si.1 <- function(model, design, df, resamp) {
 
