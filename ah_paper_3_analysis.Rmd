@@ -24,21 +24,18 @@ library(parallel)
 library(tikzDevice)
 ```
 
-# Set seed to make results replicable
+# Set seed to make results replicable and get mean ACE score for White group from original data
 ```{r}
 set.seed(123)
+mean_pois <- 2.3433
 ```
+
 
 ## Intervention code (setting White as reference racial group)
 ```{r}
-si.1 <- function(model, design, df, resamp) {
-
-  # set the level of variation around the mean white ACE score (Poisson dist)
-  mean_pois <- tidy.MIresult(MIcombine(with(
-    ah_nlo.mi,
-    svyby(~ ace_otero, by = ~ multi_1, svymean, data = ah_nlo)
-  )))[1, 2]
+si.1 <- function(model, design, df, resamp) { 
   
+  # STEP 1: use the estimated beta coefs and vcov from outcome model to generate a single resampled value of the beta coefs from a mvnorm dist 
   # get coefficients and vcov matrix from multiply imputed data
   b <- model$coefficients
   vc <- model$variance
@@ -46,14 +43,13 @@ si.1 <- function(model, design, df, resamp) {
   # resampling the distributions of the betas n=resamp times
   b.resamp <- MASS::mvrnorm(n = resamp, mu = b, Sigma = vc)
   
-  # Create containers for simulated & resampled risk differences
+  # create containers for simulated & resampled risk differences
   # RENAMING TO RESAMP.RD.* (BOOTSTRAP HAS SPECIFIC MEANING)
   resamp.rd.wt <- rep(NA, resamp)
   resamp.rd.bl <- rep(NA, resamp)
   resamp.rd.as <- rep(NA, resamp)
   resamp.rd.ai <- rep(NA, resamp)
-  resamp.rd.mr <- rep(NA, resamp)
-  
+  resamp.rd.mr <- rep(NA, resamp)  
   
   # initialize storage vectors for resampled and intervened scores
   acediff.ot.wt <-
@@ -66,21 +62,20 @@ si.1 <- function(model, design, df, resamp) {
   # storage vector for counts of participants by race across resampled datasets
   obs_resamp <- list()
   
-  
+  # STEP 2: resample covariabe values with replacement m times from one data frame and get distribution of covariates under no intervention
   for (b in 1:resamp) {
     index <- sample(nrow(df), replace = T) # same size as cc data
     data.resamp0 <- df[index,]
     
     # observed distribution of covariates: prevalence under no intervention
-    
     X.0 <- model.matrix(
       ~ BIO_SEX4 + age_w4 + max_par_edu_w1 + fam_inc_w1 +
         par_sup_w1 + nei_dis_w1 + ace_otero * multi_1,
       data = data.resamp0
     )
     
-    # estimate prevalence in original data
-    # THIS SHOULDN'T CHANGE IN THE INTERVENTION LOOP:
+    # STEP 3: use coefs in step 1 to obtain predicted probability of anxiety for each observation 
+    # sum across all observations to estimate race-specific prevalence of anxiety under no intervention
     p0.wt <- plogis(X.0[X.0[, 11] == 0 &
                           X.0[, 12] == 0 &
                           X.0[, 13] == 0 &
@@ -88,9 +83,7 @@ si.1 <- function(model, design, df, resamp) {
     p0.bl <- plogis(X.0[X.0[, 11] == 1, ] %*% b.resamp[b, ])
     p0.as <- plogis(X.0[X.0[, 12] == 1, ] %*% b.resamp[b, ])
     p0.ai <- plogis(X.0[X.0[, 13] == 1, ] %*% b.resamp[b, ])
-    p0.mr <- plogis(X.0[X.0[, 14] == 1, ] %*% b.resamp[b, ])
-    # COEFFICIENT VARIES OVER RESAMPLED VALUES
-    
+    p0.mr <- plogis(X.0[X.0[, 14] == 1, ] %*% b.resamp[b, ])    
     
     # create lists to hold sim results from multiple intervention draws
     simres.ot.wt <-
@@ -100,7 +93,7 @@ si.1 <- function(model, design, df, resamp) {
       simres.cf.bl <- simres.cf.as <- simres.cf.ai <-
       simres.cf.mr <- list()
     
-    
+    # STEP 4: Create a copy of resampled data and replace ACE score for non-White participants with random draw from Poisson model for White group
     # make a copy of X.0 and data.resamp and identify those receiving intervention
     data.resamp1 <- data.resamp0
     data.resamp1 <- data.resamp1 %>%
@@ -118,10 +111,8 @@ si.1 <- function(model, design, df, resamp) {
       unique(data.resamp1$AID[data.resamp1$mod_cf == 1])
     
     # stochastic intervention: alter exposure distributions
-    
-    ### Create a vector of mean_pois with # of obs = ids.
-    ### exp(b1 + b2*w1 + b3*w2....) - coming out of data.resamp1
-    
+    # Create a vector of mean_pois with # of obs = ids.
+    # exp(b1 + b2*w1 + b3*w2....) - coming out of data.resamp1
     for (j in ids) {
       data.resamp1$ace_cf[data.resamp1$AID == j] <-
         min(10, rpois(1, mean_pois))
@@ -136,7 +127,7 @@ si.1 <- function(model, design, df, resamp) {
         data = data.resamp1
       )
     
-    # estimate prevalence under intervention data:
+    # STEP 5: repeat step 3, get prevalence from single draw from intervention data
     p1.wt <- plogis(X.1[X.1[, 11] == 0 &
                           X.1[, 12] == 0 &
                           X.1[, 13] == 0 &
@@ -150,14 +141,14 @@ si.1 <- function(model, design, df, resamp) {
     p1.mr <-
       plogis(X.1[X.1[, 14] == 1, ] %*% b.resamp[b, ])
     
-    # RISK DIFFERENCES FOR EACH OBS IN SAMPLED POPULATION
+    # STEP 6: calculate RDs by race as averaged RDs across each observation in each racial group from resampled population
     rd.wt <- p1.wt - p0.wt
     rd.bl <- p1.bl - p0.bl
     rd.as <- p1.as - p0.as 
     rd.ai <- p1.ai - p0.ai 
     rd.mr <- p1.mr - p0.mr
     
-    # FILL IN LIST WITH THE RESAMPLED RISK DIFFERENCES
+    # fill in list with resampled risk differences
     resamp.rd.wt[b] <- mean(rd.wt)
     resamp.rd.bl[b] <- mean(rd.bl)
     resamp.rd.as[b] <- mean(rd.as)
@@ -196,7 +187,8 @@ si.1 <- function(model, design, df, resamp) {
       data.resamp1 %>% filter(multi_1 == "Multiracial") %>%
       group_by(ace_cf) %>% tally()
     
-    # FILL IN LIST FOR SCORES FROM INTERVENTIONS ACROSS b RESAMPLED DATASETS
+    STEP 7: repeat 1,000 times to build sampling dist of the race-specific RDs, we reporting median differences and quantile-based 95% UIs
+    # fill in list for scores from interventions across b resampled datasets
     acediff.ot.wt[[b]] <- sim.ot.wt
     acediff.ot.bl[[b]] <- sim.ot.bl
     acediff.ot.as[[b]] <- sim.ot.as
@@ -208,7 +200,7 @@ si.1 <- function(model, design, df, resamp) {
     acediff.cf.ai[[b]] <- sim.cf.ai
     acediff.cf.mr[[b]] <- sim.cf.mr
     
-    # FILL IN LIST WITH COUNTS OF PARTICIPANTS
+    # fill in list with counts of participants
     obs_cts <- data.resamp0 %>% group_by(multi_1) %>% tally() %>%
       rename(!!paste0("rs_", b) := n)
     obs_resamp[[b]] <- obs_cts
