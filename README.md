@@ -1,5 +1,5 @@
 # stochastic_intervention
-Code to replicate stochastic intervention on ACE scores across racial groups
+Code to replicate stochastic intervention on ACE scores across racial groups. Code adapted from [Ahern et al 2016](https://doi.org/10.2105/AJPH.2016.303425).
 
 
 1. First, we use the estimated beta coefficients and variance-covariance matrix from our outcome model to generate a single resampled value of the beta coefficients from a multivariate normal distribution (37–39).
