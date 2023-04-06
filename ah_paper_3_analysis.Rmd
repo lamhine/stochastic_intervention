@@ -1,0 +1,724 @@
+---
+title: "Paper 3 Data Analysis"
+author: "Tracy Lam-Hine"
+date: "5/20/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load libraries
+```{r}
+library(tidyverse)
+library(survey)
+library(jtools)
+library(janitor)
+library(scales)
+library(mitools)
+library(Hmisc)
+library(MASS)
+library(boot)
+library(parallel)
+library(tikzDevice)
+```
+
+# Set seed to make results replicable
+```{r}
+set.seed(123)
+```
+
+# Get model and data.frame for stochastic interventions
+```{r}
+# set model to use
+model <- mi_res.anx
+
+# remove latino and other race participants for the model
+ah_nlo <- ah_cc %>% 
+   filter(latino != 1, 
+          multi_1 != "Other_alone") %>% 
+   dplyr::select(-c("latino", "preg_w4")) %>% 
+  #mutate(multi_1 = fct_relevel(multi_1, "Asian_alone")) %>% 
+  mutate(multi_1 = droplevels(multi_1)) %>% 
+   filter(complete.cases(.)) # drop incomplete cases for now
+
+# additionally remove pregnant participants for the model
+ah_nlop <- ah_cc %>% 
+   filter(latino != 1, 
+          multi_1 != "Other_alone",
+          preg_w4 != 1) %>% 
+   dplyr::select(-c("latino", "preg_w4")) %>% 
+  mutate(multi_1 = fct_relevel(multi_1, "Asian_alone"),
+         multi_1 = droplevels(multi_1)) %>% 
+   filter(complete.cases(.)) # drop incomplete cases for now
+```
+
+## Intervention 1 IF WHITES ARE REFERENCE
+```{r}
+si.1 <- function(model, design, df, resamp) {
+
+  # set the level of variation around the mean white ACE score (Poisson dist)
+  mean_pois <- tidy.MIresult(MIcombine(with(
+    ah_nlo.mi,
+    svyby(~ ace_otero, by = ~ multi_1, svymean, data = ah_nlo)
+  )))[1, 2]
+  
+  # get coefficients and vcov matrix from multiply imputed data
+  b <- model$coefficients
+  vc <- model$variance
+  
+  # resampling the distributions of the betas n=resamp times
+  b.resamp <- MASS::mvrnorm(n = resamp, mu = b, Sigma = vc)
+  
+  # Create containers for simulated & resampled risk differences
+  # RENAMING TO RESAMP.RD.* (BOOTSTRAP HAS SPECIFIC MEANING)
+  resamp.rd.wt <- rep(NA, resamp)
+  resamp.rd.bl <- rep(NA, resamp)
+  resamp.rd.as <- rep(NA, resamp)
+  resamp.rd.ai <- rep(NA, resamp)
+  resamp.rd.mr <- rep(NA, resamp)
+  
+  
+  # initialize storage vectors for resampled and intervened scores
+  acediff.ot.wt <-
+    acediff.ot.bl  <- acediff.ot.as <- acediff.ot.ai <-
+    acediff.ot.mr <- list()
+  acediff.cf.wt <-
+    acediff.cf.bl  <- acediff.cf.as <- acediff.cf.ai <-
+    acediff.cf.mr <- list()
+  
+  # storage vector for counts of participants by race across resampled datasets
+  obs_resamp <- list()
+  
+  
+  for (b in 1:resamp) {
+    index <- sample(nrow(df), replace = T) # same size as cc data
+    data.resamp0 <- df[index,]
+    
+    # observed distribution of covariates: prevalence under no intervention
+    
+    X.0 <- model.matrix(
+      ~ BIO_SEX4 + age_w4 + max_par_edu_w1 + fam_inc_w1 +
+        par_sup_w1 + nei_dis_w1 + ace_otero * multi_1,
+      data = data.resamp0
+    )
+    
+    # estimate prevalence in original data
+    # THIS SHOULDN'T CHANGE IN THE INTERVENTION LOOP:
+    p0.wt <- plogis(X.0[X.0[, 11] == 0 &
+                          X.0[, 12] == 0 &
+                          X.0[, 13] == 0 &
+                          X.0[, 14] == 0, ] %*% b.resamp[b, ])
+    p0.bl <- plogis(X.0[X.0[, 11] == 1, ] %*% b.resamp[b, ])
+    p0.as <- plogis(X.0[X.0[, 12] == 1, ] %*% b.resamp[b, ])
+    p0.ai <- plogis(X.0[X.0[, 13] == 1, ] %*% b.resamp[b, ])
+    p0.mr <- plogis(X.0[X.0[, 14] == 1, ] %*% b.resamp[b, ])
+    # COEFFICIENT VARIES OVER RESAMPLED VALUES
+    
+    
+    # create lists to hold sim results from multiple intervention draws
+    simres.ot.wt <-
+      simres.ot.bl <- simres.ot.as <- simres.ot.ai <-
+      simres.ot.mr <- list()
+    simres.cf.wt <-
+      simres.cf.bl <- simres.cf.as <- simres.cf.ai <-
+      simres.cf.mr <- list()
+    
+    
+    # make a copy of X.0 and data.resamp and identify those receiving intervention
+    data.resamp1 <- data.resamp0
+    data.resamp1 <- data.resamp1 %>%
+      mutate(
+        # this is the new exposure variable copied from existing:
+        ace_cf = ace_otero,
+        # indicator variable for participants receiving intervention
+        mod_cf = NA_real_,
+        mod_cf = case_when(multi_1 != "White_alone" ~ 1,
+                           TRUE ~ 0)
+      )
+    
+    # get IDs of participants who receive intervention
+    ids <-
+      unique(data.resamp1$AID[data.resamp1$mod_cf == 1])
+    
+    # stochastic intervention: alter exposure distributions
+    
+    ### Create a vector of mean_pois with # of obs = ids.
+    ### exp(b1 + b2*w1 + b3*w2....) - coming out of data.resamp1
+    
+    for (j in ids) {
+      data.resamp1$ace_cf[data.resamp1$AID == j] <-
+        min(10, rpois(1, mean_pois))
+    }
+    
+    # new distribution of covars under intervention scenario
+    # call in data.resamp1 and new exposure distribution
+    X.1 <-
+      model.matrix(
+        ~ BIO_SEX4 + age_w4 + max_par_edu_w1 + fam_inc_w1 +
+          par_sup_w1 + nei_dis_w1 + ace_cf * multi_1,
+        data = data.resamp1
+      )
+    
+    # estimate prevalence under intervention data:
+    p1.wt <- plogis(X.1[X.1[, 11] == 0 &
+                          X.1[, 12] == 0 &
+                          X.1[, 13] == 0 &
+                          X.1[, 14] == 0, ] %*% b.resamp[b, ])
+    p1.bl <-
+      plogis(X.1[X.1[, 11] == 1, ] %*% b.resamp[b, ])
+    p1.as <-
+      plogis(X.1[X.1[, 12] == 1, ] %*% b.resamp[b, ])
+    p1.ai <-
+      plogis(X.1[X.1[, 13] == 1, ] %*% b.resamp[b, ])
+    p1.mr <-
+      plogis(X.1[X.1[, 14] == 1, ] %*% b.resamp[b, ])
+    
+    # RISK DIFFERENCES FOR EACH OBS IN SAMPLED POPULATION
+    rd.wt <- p1.wt - p0.wt
+    rd.bl <- p1.bl - p0.bl
+    rd.as <- p1.as - p0.as 
+    rd.ai <- p1.ai - p0.ai 
+    rd.mr <- p1.mr - p0.mr
+    
+    # FILL IN LIST WITH THE RESAMPLED RISK DIFFERENCES
+    resamp.rd.wt[b] <- mean(rd.wt)
+    resamp.rd.bl[b] <- mean(rd.bl)
+    resamp.rd.as[b] <- mean(rd.as)
+    resamp.rd.ai[b] <- mean(rd.ai)
+    resamp.rd.mr[b] <- mean(rd.mr)
+    
+    # get original and intervened aces scores counts 
+    sim.ot.wt <-
+      data.resamp1 %>% filter(multi_1 == "White_alone") %>%
+      group_by(ace_otero) %>% tally()
+    sim.ot.bl <-
+      data.resamp1 %>% filter(multi_1 == "Black_alone") %>%
+      group_by(ace_otero) %>% tally()
+    sim.ot.as <-
+      data.resamp1 %>% filter(multi_1 == "Asian_alone") %>%
+      group_by(ace_otero) %>% tally()
+    sim.ot.ai <-
+      data.resamp1 %>% filter(multi_1 == "AI/NA_alone") %>%
+      group_by(ace_otero) %>% tally()
+    sim.ot.mr <-
+      data.resamp1 %>% filter(multi_1 == "Multiracial") %>%
+      group_by(ace_otero) %>% tally()
+    sim.cf.wt <-
+      data.resamp1 %>% filter(multi_1 == "White_alone") %>%
+      group_by(ace_cf) %>% tally()
+    sim.cf.bl <-
+      data.resamp1 %>% filter(multi_1 == "Black_alone") %>%
+      group_by(ace_cf) %>% tally()
+    sim.cf.as <-
+      data.resamp1 %>% filter(multi_1 == "Asian_alone") %>%
+      group_by(ace_cf) %>% tally()
+    sim.cf.ai <-
+      data.resamp1 %>% filter(multi_1 == "AI/NA_alone") %>%
+      group_by(ace_cf) %>% tally()
+    sim.cf.mr <-
+      data.resamp1 %>% filter(multi_1 == "Multiracial") %>%
+      group_by(ace_cf) %>% tally()
+    
+    # FILL IN LIST FOR SCORES FROM INTERVENTIONS ACROSS b RESAMPLED DATASETS
+    acediff.ot.wt[[b]] <- sim.ot.wt
+    acediff.ot.bl[[b]] <- sim.ot.bl
+    acediff.ot.as[[b]] <- sim.ot.as
+    acediff.ot.ai[[b]] <- sim.ot.ai
+    acediff.ot.mr[[b]] <- sim.ot.mr
+    acediff.cf.wt[[b]] <- sim.cf.wt
+    acediff.cf.bl[[b]] <- sim.cf.bl
+    acediff.cf.as[[b]] <- sim.cf.as
+    acediff.cf.ai[[b]] <- sim.cf.ai
+    acediff.cf.mr[[b]] <- sim.cf.mr
+    
+    # FILL IN LIST WITH COUNTS OF PARTICIPANTS
+    obs_cts <- data.resamp0 %>% group_by(multi_1) %>% tally() %>%
+      rename(!!paste0("rs_", b) := n)
+    obs_resamp[[b]] <- obs_cts
+  }
+  
+  diffs <- bind_rows(
+    bind_rows(
+      acediff.ot.wt %>% reduce(full_join, by = "ace_otero") %>%
+        adorn_totals("col") %>% rename("n" = Total) %>%
+        pivot_longer(cols = 1, values_to = "ace_ct") %>%
+        dplyr::select(name, ace_ct, n),
+      acediff.cf.wt %>% reduce(full_join, by = "ace_cf") %>%
+        adorn_totals("col") %>% rename("n" = Total) %>%
+        pivot_longer(cols = 1, values_to = "ace_ct") %>%
+        dplyr::select(name, ace_ct, n)
+    ) %>%
+      mutate(multi_1 = "White_alone"),
+    bind_rows(
+      acediff.ot.bl %>% reduce(full_join, by = "ace_otero") %>%
+        adorn_totals("col") %>% rename("n" = Total) %>%
+        pivot_longer(cols = 1, values_to = "ace_ct") %>%
+        dplyr::select(name, ace_ct, n),
+      acediff.cf.bl %>% reduce(full_join, by = "ace_cf") %>%
+        adorn_totals("col") %>% rename("n" = Total) %>%
+        pivot_longer(cols = 1, values_to = "ace_ct") %>%
+        dplyr::select(name, ace_ct, n)
+    )  %>%
+      mutate(multi_1 = "Black_alone"),
+    bind_rows(
+      acediff.ot.as %>% reduce(full_join, by = "ace_otero") %>%
+        adorn_totals("col") %>% rename("n" = Total) %>%
+        pivot_longer(cols = 1, values_to = "ace_ct") %>% dplyr::select(name, ace_ct, n),
+      acediff.cf.as %>% reduce(full_join, by = "ace_cf") %>%
+        adorn_totals("col") %>% rename("n" = Total) %>%
+        pivot_longer(cols = 1, values_to = "ace_ct") %>% dplyr::select(name, ace_ct, n)
+    ) %>%
+      mutate(multi_1 = "Asian_alone"),
+    bind_rows(
+      acediff.ot.ai %>% reduce(full_join, by = "ace_otero") %>%
+        adorn_totals("col") %>% rename("n" = Total) %>%
+        pivot_longer(cols = 1, values_to = "ace_ct") %>% dplyr::select(name, ace_ct, n),
+      acediff.cf.ai %>% reduce(full_join, by = "ace_cf") %>%
+        adorn_totals("col") %>% rename("n" = Total) %>%
+        pivot_longer(cols = 1, values_to = "ace_ct") %>% dplyr::select(name, ace_ct, n)
+    ) %>%
+      mutate(multi_1 = "AI/NA_alone"),
+    bind_rows(
+      acediff.ot.mr %>% reduce(full_join, by = "ace_otero") %>%
+        adorn_totals("col") %>% rename("n" = Total) %>%
+        pivot_longer(cols = 1, values_to = "ace_ct") %>% dplyr::select(name, ace_ct, n),
+      acediff.cf.mr %>% reduce(full_join, by = "ace_cf") %>%
+        adorn_totals("col") %>% rename("n" = Total) %>%
+        pivot_longer(cols = 1, values_to = "ace_ct") %>% dplyr::select(name, ace_ct, n)
+    ) %>%
+      mutate(multi_1 = "Multiracial")
+  ) %>%
+    mutate(
+      multi_1 =
+        case_when(
+          multi_1 == "White_alone" ~ "White",
+          multi_1 == "Black_alone" ~ "Black",
+          multi_1 == "Asian_alone" ~ "Asian",
+          multi_1 == "AI/NA_alone" ~ "AI/NA",
+          TRUE ~ multi_1
+        )
+    )
+  
+  # sum counts of participants across all resampled datasets
+  resamp_cts <-
+    obs_resamp %>% reduce(full_join, by = "multi_1") %>%
+    adorn_totals("col") %>% dplyr::select(multi_1, Total) %>% untabyl() %>%
+    mutate(multi_1 = as.character(multi_1),
+           multi_1 = str_remove(multi_1, "_alone"))
+  
+  # calculate mean ace score before and after intervention
+  diffs_sum <- diffs %>%
+    mutate(sump = ace_ct * n) %>%
+    group_by(multi_1, name) %>%
+    summarise(sum = sum(sump)) %>%
+    pivot_wider(names_from = name, values_from = sum) %>%
+    ungroup() %>%
+    inner_join(resamp_cts, by = "multi_1") %>%
+    mutate(ace_otero_mean = ace_otero / Total,
+           ace_cf_mean = ace_cf / Total) %>%
+    dplyr::select(multi_1, Total, ace_otero_mean, ace_cf_mean)
+  
+  
+  return(list(
+    df.resamp = tibble(
+      "white" = resamp.rd.wt,
+      "black" = resamp.rd.bl,
+      "asian" = resamp.rd.as,
+      "ai/na" = resamp.rd.ai,
+      "multiracial" = resamp.rd.mr
+    ),
+    summary = tibble(
+      "group" = c("white", "black", "asian", "ai/na", "multiracial"),
+      "rd_mean" = c(
+        mean(resamp.rd.wt),
+        mean(resamp.rd.bl),
+        mean(resamp.rd.as),
+        mean(resamp.rd.ai),
+        mean(resamp.rd.mr)
+      ) * 100,
+      "rd_med" = c(
+        median(resamp.rd.wt),
+        median(resamp.rd.bl),
+        median(resamp.rd.as),
+        median(resamp.rd.ai),
+        median(resamp.rd.mr)
+      ) * 100,
+      "lb" = c(
+        quantile(resamp.rd.wt, 0.025),
+        quantile(resamp.rd.bl, 0.025),
+        quantile(resamp.rd.as, 0.025),
+        quantile(resamp.rd.ai, 0.025),
+        quantile(resamp.rd.mr, 0.025)
+      ) * 100,
+      "ub" = c(
+        quantile(resamp.rd.wt, 0.975),
+        quantile(resamp.rd.bl, 0.975),
+        quantile(resamp.rd.as, 0.975),
+        quantile(resamp.rd.ai, 0.975),
+        quantile(resamp.rd.mr, 0.975)
+      ) * 100,
+      "se" = c(
+        sd(resamp.rd.wt) / sqrt(length(resamp.rd.wt)),
+        sd(resamp.rd.bl) / sqrt(length(resamp.rd.bl)),
+        sd(resamp.rd.as) / sqrt(length(resamp.rd.as)),
+        sd(resamp.rd.ai) / sqrt(length(resamp.rd.ai)),
+        sd(resamp.rd.mr) / sqrt(length(resamp.rd.mr))
+      )
+    ),
+    diffs = diffs,
+    diffs_sum = diffs_sum
+  ))
+}
+
+```
+
+## Simulate Intervention 1
+```{r}
+options(mc.cores = 4)
+
+start <- Sys.time()
+si.1_depb_1000 <- si.1(model = mi_rr.depb, design = ah_nlo.mi, df = ah_nlo.mi$designs[[12]]$variables, resamp = 1000)
+stop <- Sys.time()
+
+stop-start
+
+```
+
+## Another simulation
+```{r}
+options(mc.cores = 4)
+
+start <- Sys.time()
+si.1_depb_1000 <- si.1(model = mi_depb.ast, design = ah_nlo.mi, df = ah_nlo.mi$designs[[12]]$variables, resamp = 1000)
+stop <- Sys.time()
+
+stop-start
+
+```
+
+## GET PLOT OF BASELINE AND INTERVENED ACES DISTRIBUTIONS
+```{r}
+# plot results
+p3_plot <- ggplot(si.1_depb_1000$diffs, aes(x = ace_ct, y = n, fill = name)) +
+  geom_bar(stat = "identity",
+           alpha = 0.4,
+           position = "identity") +
+  facet_wrap(vars(multi_1), scales = "free_y", ncol = 2) +
+  scale_fill_discrete(name = "ACE Score",
+                      labels = c("Intervened", "Baseline")) +
+  scale_x_continuous(breaks = c(0:10)) +
+  scale_y_continuous(labels = unit_format(unit = "K", scale = 1e-3)) +
+  theme(axis.title.x = element_blank(),
+        legend.position = "bottom") +
+  ylab("Count")
+
+# get plots in LaTeX
+options(tikzDocumentDeclaration = "\\documentclass[12pt]{article}")
+
+tikz(file = "p3_plot.tex", width = 5.5)
+
+print(p3_plot)
+
+dev.off()
+```
+
+## GET PLOT OF SIMULATED RISK DIFFERENCES FROM RESAMPLED DATA
+```{r}
+si_res <- si.1_depb_1000$df.resamp %>% 
+  pivot_longer(cols=c(1:5),names_to = "race") %>% 
+  mutate(value = value * 100)
+
+labs <- c("White n =\n(7,758,492)", "Black n =\n(2,919,331)", "Asian n =\n(807,539)", "AI/NA n =\n(76,681)", "Multiracial\nn = (835,957)")
+
+p3_rdplot_depb <- ggplot() + 
+  geom_point(data = si_res, 
+             aes(x = race, y = value, color = race),
+             alpha = 0.3,
+             position = position_jitter()) +
+  theme_bw() + 
+  theme(legend.position = "none",
+        axis.title.x = element_blank()) +
+  scale_x_discrete(limits = c("white", "black", "asian", "ai/na", "multiracial"),
+                   labels = labs) +
+  scale_y_continuous(breaks=seq(-10,10,by=1)) +
+  ylab("Simulated cases of depression averted per 100 population")
+
+  # get plots in LaTeX  
+  options(tikzDocumentDeclaration = "\\documentclass[12pt]{article}")  
+  
+  tikz(file = "p3_rdplot.tex", width = 5.5)
+    
+  print(p3_rdplot_depb) 
+    
+  dev.off()
+```
+
+
+## GET PLOT OF SIMULATED ASTHMA RISK DIFFERENCES FROM RESAMPLED DATA
+```{r}
+si_res_ast <- si.1_ast_1000$df.resamp %>% 
+  pivot_longer(cols=c(1:5),names_to = "race") %>% 
+  mutate(value = value * 100)
+
+labs <- c("White n =\n(7,758,492)", "Black n =\n(2,919,331)", "Asian n =\n(807,539)", "AI/NA n =\n(76,681)", "Multiracial\nn = (835,957)")
+
+p3_rdplot_ast <- ggplot() + 
+  geom_point(data = si_res_ast, 
+             aes(x = race, y = value, color = race),
+             alpha = 0.3,
+             position = position_jitter()) +
+  theme_bw() + 
+  theme(legend.position = "none",
+        axis.title.x = element_blank()) +
+  scale_x_discrete(limits = c("white", "black", "asian", "ai/na", "multiracial"),
+                   labels = labs) +
+  scale_y_continuous(breaks=seq(-10,10,by=1)) +
+  ylab("Simulated cases of asthma averted per 100 population")
+    
+  print(p3_rdplot_ast) 
+```
+## GET PLOT OF SIMULATED ANXIETY RISK DIFFERENCES FROM RESAMPLED DATA
+```{r}
+si.1_anx_1000 <- si.1(model = mi_rr.anx, design = ah_nlo.mi, df = ah_nlo.mi$designs[[12]]$variables, resamp = 1000)
+
+
+p3_plot_anx <- ggplot(si.1_anx_1000$diffs, aes(x = ace_ct, y = n, fill = name)) +
+  geom_bar(stat = "identity",
+           alpha = 0.4,
+           position = "identity") +
+  facet_wrap(vars(multi_1), scales = "free_y", ncol = 2) +
+  scale_fill_discrete(name = "ACE Score",
+                      labels = c("Intervened", "Baseline")) +
+  scale_x_continuous(breaks = c(0:10)) +
+  scale_y_continuous(labels = unit_format(unit = "K", scale = 1e-3)) +
+  theme(axis.title.x = element_blank(),
+        legend.position = "bottom") +
+  ylab("Count")
+
+print(p3_plot_anx)
+
+
+si_res_anx <- si.1_anx_1000$df.resamp %>% 
+  pivot_longer(cols=c(1:5),names_to = "race") %>% 
+  mutate(value = value * 100)
+
+labs <- c("White n =\n(7,759,094)", "Black n =\n(2,916,800)", "Asian n =\n(807,663)", "AI/NA n =\n(77,051)", "Multiracial\nn = (837,392)")
+
+p3_rdplot_anx <- ggplot() + 
+  geom_point(data = si_res_anx, 
+             aes(x = race, y = value, color = race),
+             alpha = 0.3,
+             position = position_jitter()) +
+  theme_bw() + 
+  theme(legend.position = "none",
+        axis.title.x = element_blank()) +
+  scale_x_discrete(limits = c("white", "black", "asian", "ai/na", "multiracial"),
+                   labels = labs) +
+  scale_y_continuous(breaks=seq(-10,10,by=1)) +
+  ylab("Simulated cases of anxiety averted per 100 population")
+    
+  print(p3_rdplot_anx) 
+```
+
+## GET PLOT OF SIMULATED SUICIDAL IDEATION RISK DIFFERENCES FROM RESAMPLED DATA
+```{r}
+si.1_sui_1000 <- si.1(model = mi_rr.sui, design = ah_nlo.mi, df = ah_nlo.mi$designs[[12]]$variables, resamp = 1000)
+
+si_res_sui <- si.1_sui_1000$df.resamp %>% 
+  pivot_longer(cols=c(1:5),names_to = "race") %>% 
+  mutate(value = value * 100)
+
+labs <- c("White n =\n(7,759,094)", "Black n =\n(2,916,800)", "Asian n =\n(807,663)", "AI/NA n =\n(77,051)", "Multiracial\nn = (837,392)")
+
+p3_rdplot_sui <- ggplot() + 
+  geom_point(data = si_res_sui, 
+             aes(x = race, y = value, color = race),
+             alpha = 0.3,
+             position = position_jitter()) +
+  theme_bw() + 
+  theme(legend.position = "none",
+        axis.title.x = element_blank()) +
+  scale_x_discrete(limits = c("white", "black", "asian", "ai/na", "multiracial"),
+                   labels = labs) +
+  scale_y_continuous(breaks=seq(-10,10,by=1)) +
+  ylab("Simulated cases of suicidal ideation averted per 100 population")
+    
+  print(p3_rdplot_sui) 
+```
+
+## Intervention 2 IF ASIANS ARE REFERENCE
+si2 <- function(model, design, df, resamp, sims){
+  
+     ### I THINK BOOTSTRAP # AND RESAMP SHOULD BE THE SAME (COULD BE MISTAKEN)
+     ### SIMS SHOULD BE THE # OF INTERVENTIONS TO DRAW FOR EACH CONFOUNDER SET.
+     
+     # set the level of variation around the mean white ACE score (Poisson dist)
+     mean_pois <- tidy.MIresult(MIcombine(with(
+          design,
+          svyglm(ace_otero ~ multi_1,
+                 data=design,
+                 family=quasipoisson())
+     )))
+     mean_pois <- exp(mean_pois[1,2] + # intercept
+                           mean_pois[2,2]) # beta coef for white
+     
+     # get coefficients and vcov matrix from multiply imputed data
+     b <- model$coefficients
+     vc <- model$variance
+     
+     # resampling the distributions of the betas n=resamp times
+     b.resamp <- MASS::mvrnorm(n=resamp, mu = b, Sigma=vc)
+     
+     # Create containers for simulated & resampled risk differences
+     # RENAMING TO RESAMP.RD.* (BOOTSTRAP HAS SPECIFIC MEANING)
+     resamp.rd.as <- rep(NA, resamp) 
+     resamp.rd.wt <- rep(NA, resamp) 
+     resamp.rd.bl <- rep(NA, resamp) 
+     resamp.rd.ai <- rep(NA, resamp) 
+     resamp.rd.mr <- rep(NA, resamp) 
+     
+     
+     for (b in 1:resamp){
+          
+          index <- sample(nrow(df), replace=T) # same size as cc data
+          data.resamp0 <- df[index,]
+          
+          # observed distribution of covariates: prevalence under no intervention
+          
+          X.0 <- model.matrix(
+               ~ BIO_SEX4 + age_w4 + mis_w1 + max_par_edu_w1 + fam_inc_w1 + 
+                    par_sup_w1 + exp_dis_w4 + nei_dis_w1 + ace_otero * multi_1,
+               data=data.resamp0
+          )
+          
+          # estimate prevalence of anxiety in original data
+          # THIS SHOULDN'T CHANGE IN THE INTERVENTION LOOP:
+          p0.as <- plogis(X.0[X.0[, 13] == 0 &
+                                   X.0[, 14] == 0 &
+                                   X.0[, 15] == 0 &
+                                   X.0[, 16] == 0, ] %*% b.resamp[b, ])
+          p0.wt <- plogis(X.0[X.0[, 13] == 1, ] %*% b.resamp[b, ])
+          p0.bl <- plogis(X.0[X.0[, 14] == 1, ] %*% b.resamp[b, ])
+          p0.ai <- plogis(X.0[X.0[, 15] == 1, ] %*% b.resamp[b, ]) 
+          p0.mr <- plogis(X.0[X.0[, 16] == 1, ] %*% b.resamp[b, ])
+          # COEFFICIENT VARIES OVER RESAMPLED VALUES
+          
+
+          # BEST TO CLEAR OUT THESE STORAGE MATRICES HERE:
+          rd.wt <- matrix(NA, nrow=length(p0.wt), ncol=sims) # ROW=OBS, COL=DRAW FROM INTERVENTION
+          rd.bl <- matrix(NA, nrow=length(p0.bl), ncol=sims)
+          rd.as <- matrix(NA, nrow=length(p0.as), ncol=sims)
+          rd.ai <- matrix(NA, nrow=length(p0.ai), ncol=sims)
+          rd.mr <- matrix(NA, nrow=length(p0.mr), ncol=sims)
+          
+          
+          # INTERVENTION LOOP
+          # TO AVERAGE OVER THE RANDOM DISTRIBUTION OF INTERVENTIONS
+          for (i in 1:sims){
+               # make a copy of X.0 and data.resamp and identify those receiving intervention
+               data.resamp1 <- data.resamp0
+               data.resamp1 <- data.resamp1 %>%
+                    mutate(
+                         # this is the new exposure variable copied from existing:
+                         ace_cf = ace_otero,
+                         # indicator variable for participants receiving intervention
+                         mod_cf = NA_real_,
+                         mod_cf = case_when(multi_1 != "Asian_alone" ~ 1,
+                                            TRUE ~ 0)
+                    )
+               
+               # get IDs of participants who receive intervention
+               ids <- unique(data.resamp1$AID[data.resamp1$mod_cf == 1])
+               
+               # stochastic intervention: alter exposure distributions
+               
+               ### Create a vector of mean_pois with # of obs = ids. 
+               ### exp(b1 + b2*w1 + b3*w2....) - coming out of data.resamp1
+               
+               for (j in ids){
+                    data.resamp1$ace_cf[data.resamp1$AID == j] <- min(10, rpois(1, mean_pois))
+               }
+               
+               # new distribution of covars under intervention scenario
+               # call in data.resamp1 and new exposure distribution
+               X.1 <- 
+                    model.matrix(
+                         ~ BIO_SEX4 + age_w4 + mis_w1 + max_par_edu_w1 + fam_inc_w1 + 
+                              par_sup_w1 + exp_dis_w4 + nei_dis_w1 + ace_cf * multi_1,
+                         data=data.resamp1
+                    )
+               
+               # estimate prevalence of anxiety under intervention data:
+               p1.wt <- plogis(X.1[X.1[, 13] == 0 &
+                                     X.1[, 14] == 0 &
+                                     X.1[, 15] == 0 &
+                                     X.1[, 16] == 0, ] %*% b.resamp[b, ]) 
+               p1.bl <- plogis(X.1[X.1[, 13] == 1, ] %*% b.resamp[b, ]) 
+               p1.as <- plogis(X.1[X.1[, 14] == 1, ] %*% b.resamp[b, ]) 
+               p1.ai <- plogis(X.1[X.1[, 15] == 1, ] %*% b.resamp[b, ]) 
+               p1.mr <- plogis(X.1[X.1[, 16] == 1, ] %*% b.resamp[b, ]) 
+               
+               # RISK DIFFERENCES FOR EACH OBS IN SAMPLED POPULATION
+               rd.wt[,i] <- p1.wt - p0.wt # EACH (ROW, COLUMN) IS THE RD FOR A OBSERVATION (ROW) FOR A
+               rd.bl[,i] <- p1.bl - p0.bl # SPECIFIC RANDOM DRAW (A) FROM INTERVENTION DIST 
+               rd.as[,i] <- p1.as - p0.as # AT EACH INTERVENTION DRAW (COLUMN I)
+               rd.ai[,i] <- p1.ai - p0.ai # GIVEN COVARIATES W (COL), 
+               rd.mr[,i] <- p1.mr - p0.mr # CORRESPONDS TO E[Y|A,W]
+                                          
+          }
+          
+          # THE RESAMPLED RISK DIFFERENCE,
+          resamp.rd.wt[b] <- mean(rowMeans(rd.wt)) 
+          resamp.rd.bl[b] <- mean(rowMeans(rd.bl)) 
+          resamp.rd.as[b] <- mean(rowMeans(rd.as)) 
+          resamp.rd.ai[b] <- mean(rowMeans(rd.ai)) 
+          resamp.rd.mr[b] <- mean(rowMeans(rd.mr)) 
+               # rowMeans() GIVES E_{A|W}[E[Y|A,W] - E[Y]] (WILL BE NROW(DF) OF THESE)
+               # mean() GIVES E_{W}[-above-] (WILL BE 1 OF THESE FOR EACH LOOP THROUGH RESAMPLE)
+     }
+     
+
+     return(
+       list(
+         df.resamp = tibble("white" = resamp.rd.wt,
+                            "black" = resamp.rd.bl,
+                            "asian" = resamp.rd.as,
+                            "ai/na" = resamp.rd.ai,
+                            "multiracial" = resamp.rd.mr
+                            ), 
+         summary = tibble(
+           "group" = c("white", "black", "asian", "ai/na", "multiracial"),
+           "rd" = c(mean(resamp.rd.wt), mean(resamp.rd.bl), mean(resamp.rd.as), 
+                  mean(resamp.rd.ai), mean(resamp.rd.mr))*100,
+           "lb" = c(quantile(resamp.rd.wt, 0.025), quantile(resamp.rd.bl, 0.025), 
+                    quantile(resamp.rd.as, 0.025), quantile(resamp.rd.ai, 0.025),
+                    quantile(resamp.rd.mr, 0.025))*100,
+           "ub" = c(quantile(resamp.rd.wt, 0.975), quantile(resamp.rd.bl, 0.975), 
+                    quantile(resamp.rd.as, 0.975), quantile(resamp.rd.ai, 0.975),
+                    quantile(resamp.rd.mr, 0.975))*100 
+           "se" = c(sd(resamp.rd.wt)/sqrt(length(resamp.rd.wt)),
+                    sd(resamp.rd.bl)/sqrt(length(resamp.rd.bl)),
+                    sd(resamp.rd.as)/sqrt(length(resamp.rd.as)),
+                    sd(resamp.rd.ai)/sqrt(length(resamp.rd.ai)),
+                    sd(resamp.rd.mr)/sqrt(length(resamp.rd.mr)),
+                    )
+           )
+         )
+     )
+}
+
+
+
+## Simulate Intervention 2
+
+options(mc.cores = 4)
+
+start <- Sys.time()
+si_ast <- si(model = mi_res.ast, design = ah_nlo.mi, df = ah_nlo, resamp = 1000, sims = 1000)
+stop <- Sys.time()
+
+stop-start
+
+save.image("C:/Users/lamhine/Desktop/env_2022-07-05.RData")
