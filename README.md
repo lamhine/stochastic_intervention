@@ -9,4 +9,3 @@ Code to replicate stochastic intervention on ACE scores across racial groups
 5. We repeat step 3 to calculate the prevalence of anxiety in this single draw from the intervention distribution.
 6. We calculate the risk differences by race as the averaged risk differences across each observation in the various racial groups from the resampled population.
 7. Finally, we repeat this procedure 1,000 times to build up the sampling distribution of the race-specific RD. From these 1,000 resampled estimates, we report median differences as race-specific point estimates and quantile-based 95% uncertainty intervals around the risk differences.
-![image](https://user-images.githubusercontent.com/8146267/230487986-2002ab4e-75e1-4372-9c3c-02d432ff1627.png)
