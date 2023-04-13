@@ -44,7 +44,6 @@ si.1 <- function(model, design, df, resamp) {
   b.resamp <- MASS::mvrnorm(n = resamp, mu = b, Sigma = vc)
   
   # create containers for simulated & resampled risk differences
-  # RENAMING TO RESAMP.RD.* (BOOTSTRAP HAS SPECIFIC MEANING)
   resamp.rd.wt <- rep(NA, resamp)
   resamp.rd.bl <- rep(NA, resamp)
   resamp.rd.as <- rep(NA, resamp)
@@ -304,28 +303,28 @@ si.1 <- function(model, design, df, resamp) {
         mean(resamp.rd.as),
         mean(resamp.rd.ai),
         mean(resamp.rd.mr)
-      ) * 100,
+      ) * 1000,
       "rd_med" = c(
         median(resamp.rd.wt),
         median(resamp.rd.bl),
         median(resamp.rd.as),
         median(resamp.rd.ai),
         median(resamp.rd.mr)
-      ) * 100,
+      ) * 1000,
       "lb" = c(
         quantile(resamp.rd.wt, 0.025),
         quantile(resamp.rd.bl, 0.025),
         quantile(resamp.rd.as, 0.025),
         quantile(resamp.rd.ai, 0.025),
         quantile(resamp.rd.mr, 0.025)
-      ) * 100,
+      ) * 1000,
       "ub" = c(
         quantile(resamp.rd.wt, 0.975),
         quantile(resamp.rd.bl, 0.975),
         quantile(resamp.rd.as, 0.975),
         quantile(resamp.rd.ai, 0.975),
         quantile(resamp.rd.mr, 0.975)
-      ) * 100,
+      ) * 1000,
       "se" = c(
         sd(resamp.rd.wt) / sqrt(length(resamp.rd.wt)),
         sd(resamp.rd.bl) / sqrt(length(resamp.rd.bl)),
@@ -341,8 +340,7 @@ si.1 <- function(model, design, df, resamp) {
 
 ```
 
-# placeholder to create labels for 
-# labs <- c("White n =\n(7,758,492)", "Black n =\n(2,919,331)", "Asian n =\n(807,539)", "AI/NA n =\n(76,681)", "Multiracial\nn = (835,957)")
+
 
 
 
@@ -350,11 +348,9 @@ si.1 <- function(model, design, df, resamp) {
 ```{r}
 si.1_anx_1000 <- si.1(model = mi_rr.anx, design = ah_nlo.mi, df = ah_nlo.mi$designs[[12]]$variables, resamp = 1000)
 
-
 p3_plot_anx <- ggplot(si.1_anx_1000$diffs, aes(x = ace_ct, y = n, fill = name)) +
   geom_bar(stat = "identity",
-           alpha = 0.4,
-           position = "identity") +
+           position = "dodged") +
   facet_wrap(vars(multi_1), scales = "free_y", ncol = 2) +
   scale_fill_discrete(name = "ACE Score",
                       labels = c("Intervened", "Baseline")) +
@@ -362,16 +358,16 @@ p3_plot_anx <- ggplot(si.1_anx_1000$diffs, aes(x = ace_ct, y = n, fill = name)) 
   scale_y_continuous(labels = unit_format(unit = "K", scale = 1e-3)) +
   theme(axis.title.x = element_blank(),
         legend.position = "bottom") +
-  ylab("Count")
+  ylab("Mean count")
 
 print(p3_plot_anx)
 
 
 si_res_anx <- si.1_anx_1000$df.resamp %>% 
   pivot_longer(cols=c(1:5),names_to = "race") %>% 
-  mutate(value = value * 100)
+  mutate(value = value * 1000)
 
-labs <- c("White n =\n(7,759,094)", "Black n =\n(2,916,800)", "Asian n =\n(807,663)", "AI/NA n =\n(77,051)", "Multiracial\nn = (837,392)")
+labs <- c("White", "Black", "Asian", "AI/NA", "Multiracial")
 
 p3_rdplot_anx <- ggplot() + 
   geom_point(data = si_res_anx, 
@@ -384,7 +380,7 @@ p3_rdplot_anx <- ggplot() +
   scale_x_discrete(limits = c("white", "black", "asian", "ai/na", "multiracial"),
                    labels = labs) +
   scale_y_continuous(breaks=seq(-10,10,by=1)) +
-  ylab("Simulated cases of anxiety averted per 100 population")
+  ylab("Simulated cases of anxiety averted per 1000 population")
     
   print(p3_rdplot_anx) 
 ```
